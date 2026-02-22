@@ -1,0 +1,10 @@
+.env
+.git
+__pycache__
+*.pyc
+inspect_db.py
+inspect_out.txt
+test_*.py
+seed.py
+*.md
+.gitignore

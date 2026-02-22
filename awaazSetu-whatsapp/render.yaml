@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: awaazSetu-whatsapp
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: MONGO_URI
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_WHATSAPP_NUMBER
+        value: "+14155238886"
+      - key: PHONE_HASH_SALT
+        sync: false
+      - key: ADMIN_PHONE
+        value: "+919920704194"
