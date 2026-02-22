@@ -11,10 +11,11 @@ No YES/NO flow — just confirmation/reminder messages.
 
 import hashlib
 import logging
-from base64 import b64encode
+import asyncio
 
-import httpx
 from bson import ObjectId
+from twilio.rest import Client
+from twilio.base.exceptions import TwilioRestException
 
 from config import (
     TWILIO_ACCOUNT_SID,
@@ -26,10 +27,6 @@ from config import (
 )
 
 logger = logging.getLogger("awaaz.relay")
-
-TWILIO_API_URL = (
-    f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
-)
 
 
 class WhatsAppRelay:
@@ -86,12 +83,15 @@ class WhatsAppRelay:
             job=job,
         )
 
+        image_url = job.get("image_url") if job else None
+
         # ── Send to user's actual phone ─────────────────────────────
-        await self._send(phone, message)
+        await self._send(phone, message, image_url=image_url)
 
         # ── Also send a copy to admin phone ──────────────────────────
         if ADMIN_PHONE and self._normalize(phone) != self._normalize(ADMIN_PHONE):
-            await self._send(ADMIN_PHONE, f"[COPY — sent to {user_name or 'user'}]\n\n{message}")
+            admin_msg = f"*[ADMIN COPY]*\nSent to: {user_name or 'user'} ({phone})\n\n{message}"
+            await self._send(ADMIN_PHONE, admin_msg, image_url=image_url)
 
     # ── Message builder ──────────────────────────────────────────────────
 
@@ -150,7 +150,9 @@ class WhatsAppRelay:
             urgency_icon = "🔴 Urgent" if urgency == "urgent" else "🟢 Normal"
 
             # Type-specific headers
-            if notif_type == "job_accepted":
+            if notif_type == "new_job_alert":
+                header = "🛠️ *New Job Nearby! | आपके पास नया काम!*"
+            elif notif_type == "job_accepted":
                 header = "✅ *Worker Assigned — Job Confirmed!*"
             elif notif_type == "job_completed":
                 header = "🎉 *Job Completed!*"
@@ -183,7 +185,14 @@ class WhatsAppRelay:
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
             )
 
-            if notif_type == "job_accepted":
+            if notif_type == "new_job_alert":
+                msg += (
+                    f"\nयह काम आपके क्षेत्र में उपलब्ध है!\n"
+                    f"This job is available in your area!\n\n"
+                    f"ऐप खोलें और काम स्वीकार करें।\n"
+                    f"Open the app to accept the job."
+                )
+            elif notif_type == "job_accepted":
                 msg += (
                     f"\nकृपया समय पर पहुँचें। | Please arrive on time.\n"
                     f"ऐप पर details देखें। | Check the app for full details."
@@ -203,8 +212,8 @@ class WhatsAppRelay:
 
     # ── Twilio send ──────────────────────────────────────────────────────
 
-    async def _send(self, phone: str, message: str) -> None:
-        """POST message via Twilio WhatsApp API."""
+    async def _send(self, phone: str, message: str, image_url: str | None = None) -> None:
+        """Send message via official Twilio SDK."""
         phone_hash = self._hash(phone)
 
         # Handle various phone formats: +919920704194, 9920704194, etc.
@@ -218,27 +227,29 @@ class WhatsAppRelay:
         else:
             destination = f"+{clean}" if not clean.startswith("+") else clean
 
-        payload = {
-            "From": f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
-            "To": f"whatsapp:{destination}",
-            "Body": message,
-        }
-
-        credentials = b64encode(
-            f"{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}".encode()
-        ).decode()
-        headers = {"Authorization": f"Basic {credentials}"}
-
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(TWILIO_API_URL, data=payload, headers=headers)
-                if resp.status_code in (200, 201):
-                    logger.info("✅ WhatsApp sent to [hash:%s…]", phone_hash[:12])
-                else:
-                    logger.warning(
-                        "Twilio %s for [hash:%s…]: %s",
-                        resp.status_code, phone_hash[:12], resp.text,
-                    )
+            # Twilio SDK handles auth and connection pooling
+            # We disable SSL verification to handle local Windows network environments with proxy/cert issues
+            client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            client.http_client.session.verify = False 
+            
+            # Wrap synchronous SDK call in thread for async safety
+            def do_send():
+                return client.messages.create(
+                    from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
+                    to=f"whatsapp:{destination}",
+                    body=message,
+                    media_url=[image_url] if image_url else None
+                )
+
+            resp = await asyncio.to_thread(do_send)
+            logger.info("✅ WhatsApp sent to [hash:%s…] | SID: %s", phone_hash[:12], resp.sid)
+
+        except TwilioRestException as exc:
+            logger.error(
+                "Twilio Error %s for [hash:%s…]: %s",
+                exc.status, phone_hash[:12], exc.msg
+            )
         except Exception as exc:
             logger.error("Twilio send failed for [hash:%s…]: %s", phone_hash[:12], exc)
 
